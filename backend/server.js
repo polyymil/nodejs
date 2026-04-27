@@ -1,39 +1,24 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const db = require('./config/db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-// Используем секретный ключ из переменных окружения или стандартный для разработки
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || 'temp_secret_change_me';
 
-// Настройка CORS для продакшена
-const allowedOrigins = process.env.ALLOWED_ORIGINS 
-    ? process.env.ALLOWED_ORIGINS.split(',')
-    : ['http://localhost:5173', 'http://localhost:3000'];
+// Создаем папку uploads если её нет
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
 
-app.use(cors({
-    origin: function(origin, callback) {
-        // Разрешаем запросы без origin (например, от мобильных приложений)
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) === -1) {
-            const msg = 'CORS policy does not allow access from this origin.';
-            return callback(new Error(msg), false);
-        }
-        return callback(null, true);
-    },
-    credentials: true
-}));
-
-// Увеличиваем лимит для загрузки фото
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
-
-// Раздача статических файлов
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(cors());
+app.use(express.json());
+app.use('/uploads', express.static(uploadDir));
 
 // ============= МИДЛВЭР ДЛЯ ПРОВЕРКИ ТОКЕНА =============
 const verifyToken = (req, res, next) => {
@@ -61,7 +46,6 @@ const verifyAdmin = (req, res, next) => {
 
 // ============= АВТОРИЗАЦИЯ =============
 
-// Регистрация
 app.post('/api/register', async (req, res) => {
     try {
         const { username, email, password } = req.body;
@@ -87,7 +71,6 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// Вход
 app.post('/api/login', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -113,19 +96,6 @@ app.post('/api/login', async (req, res) => {
         });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Проверка токена
-app.get('/api/verify', verifyToken, async (req, res) => {
-    try {
-        const [users] = await db.query('SELECT id, username, email, role FROM users WHERE id = ?', [req.user.id]);
-        if (users.length === 0) {
-            return res.status(401).json({ error: 'Пользователь не найден' });
-        }
-        res.json(users[0]);
-    } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
@@ -167,6 +137,43 @@ app.get('/api/flowers/all', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+app.get('/api/flowers/stats', async (req, res) => {
+    try {
+        const [rows] = await db.query(`
+            SELECT 
+                COUNT(*) as total,
+                AVG(price) as avg_price,
+                MIN(price) as min_price,
+                MAX(price) as max_price,
+                SUM(stock_quantity) as total_stock
+            FROM flowers
+        `);
+        res.json(rows[0]);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/flowers/main', async (req, res) => {
+    try {
+        const [rows] = await db.query('SELECT * FROM flowers LIMIT 3');
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/flowers/about', async (req, res) => {
+    try {
+        const [rows] = await db.query('SELECT * FROM flowers LIMIT 5');
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============= МАРШРУТЫ ДЛЯ ЦВЕТОВ (CRUD - ТОЛЬКО АДМИН) =============
 
 app.post('/api/flowers', verifyToken, verifyAdmin, async (req, res) => {
     try {
@@ -221,23 +228,6 @@ app.delete('/api/flowers/:id', verifyToken, verifyAdmin, async (req, res) => {
     }
 });
 
-app.get('/api/flowers/stats', async (req, res) => {
-    try {
-        const [rows] = await db.query(`
-            SELECT 
-                COUNT(*) as total,
-                AVG(price) as avg_price,
-                MIN(price) as min_price,
-                MAX(price) as max_price,
-                SUM(stock_quantity) as total_stock
-            FROM flowers
-        `);
-        res.json(rows[0]);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 // ============= МАРШРУТЫ ДЛЯ ЗАКАЗОВ =============
 
 app.get('/api/orders/table', async (req, res) => {
@@ -271,62 +261,6 @@ app.get('/api/orders/table', async (req, res) => {
     }
 });
 
-app.post('/api/orders', verifyToken, verifyAdmin, async (req, res) => {
-    try {
-        const { customer_name, customer_email, customer_phone, flower_id, quantity, total_price, delivery_address, order_status, image_url } = req.body;
-        
-        const [result] = await db.query(
-            'INSERT INTO orders (customer_name, customer_email, customer_phone, flower_id, quantity, total_price, delivery_address, order_status, image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [customer_name, customer_email, customer_phone, flower_id, quantity, total_price, delivery_address, order_status || 'pending', image_url || '/uploads/1.jpg']
-        );
-        
-        const [newOrder] = await db.query(`
-            SELECT o.*, f.name as flower_name 
-            FROM orders o 
-            LEFT JOIN flowers f ON o.flower_id = f.id 
-            WHERE o.id = ?
-        `, [result.insertId]);
-        
-        res.status(201).json(newOrder[0]);
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.put('/api/orders/:id', verifyToken, verifyAdmin, async (req, res) => {
-    try {
-        const { customer_name, customer_email, customer_phone, flower_id, quantity, total_price, delivery_address, order_status, image_url } = req.body;
-        
-        await db.query(
-            'UPDATE orders SET customer_name = ?, customer_email = ?, customer_phone = ?, flower_id = ?, quantity = ?, total_price = ?, delivery_address = ?, order_status = ?, image_url = ? WHERE id = ?',
-            [customer_name, customer_email, customer_phone, flower_id, quantity, total_price, delivery_address, order_status, image_url, req.params.id]
-        );
-        
-        const [updatedOrder] = await db.query(`
-            SELECT o.*, f.name as flower_name 
-            FROM orders o 
-            LEFT JOIN flowers f ON o.flower_id = f.id 
-            WHERE o.id = ?
-        `, [req.params.id]);
-        
-        res.json(updatedOrder[0]);
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.delete('/api/orders/:id', verifyToken, verifyAdmin, async (req, res) => {
-    try {
-        await db.query('DELETE FROM orders WHERE id = ?', [req.params.id]);
-        res.json({ message: 'Заказ успешно удален', id: req.params.id });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
 app.get('/api/orders/stats', async (req, res) => {
     try {
         const [rows] = await db.query(`
@@ -339,16 +273,13 @@ app.get('/api/orders/stats', async (req, res) => {
         `);
         res.json(rows[0]);
     } catch (error) {
-        console.error(error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// ============= МАРШРУТЫ ДЛЯ СТРАНИЦ =============
-
-app.get('/api/flowers/main', async (req, res) => {
+app.get('/api/orders/contacts', async (req, res) => {
     try {
-        const [rows] = await db.query('SELECT * FROM flowers LIMIT 3');
+        const [rows] = await db.query('SELECT * FROM orders LIMIT 6');
         res.json(rows);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -370,52 +301,22 @@ app.get('/api/employees', async (req, res) => {
     }
 });
 
-app.get('/api/flowers/about', async (req, res) => {
-    try {
-        const [rows] = await db.query('SELECT * FROM flowers LIMIT 5');
-        res.json(rows);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+// ============= ВАЖНО: УБЕРИТЕ ИЛИ ИСПРАВИТЕ МАРШРУТ '*' =============
+// Если у вас есть маршрут типа '/*', замените его на:
+
+// Тестовый маршрут для проверки работы сервера
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', message: 'Сервер работает!' });
 });
 
-app.get('/api/orders/contacts', async (req, res) => {
-    try {
-        const [rows] = await db.query('SELECT * FROM orders LIMIT 6');
-        res.json(rows);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+// ИСПРАВЛЕННЫЙ catch-all маршрут (должен быть в самом КОНЦЕ)
+app.use('/*', (req, res) => {
+    // Если нужно обрабатывать все остальные запросы
+    res.status(404).json({ error: 'Маршрут не найден' });
 });
-
-// ============= ДЛЯ ПРОДАКШЕНА: РАЗДАЧА ФРОНТЕНДА =============
-// Этот блок должен быть ПОСЛЕ всех API маршрутов, но ПЕРЕД запуском сервера
-
-if (process.env.NODE_ENV === 'production') {
-    // Путь к собранному фронтенду (dist папка)
-    const distPath = path.join(__dirname, '../frontend/dist');
-    
-    // Раздаем статические файлы фронтенда
-    app.use(express.static(distPath));
-    
-    // Все остальные запросы направляем на index.html (для Vue Router)
-    app.get('*', (req, res) => {
-        res.sendFile(path.join(distPath, 'index.html'));
-    });
-}
 
 // ============= ЗАПУСК СЕРВЕРА =============
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Сервер запущен на порту ${PORT}`);
-    console.log(`📡 Режим: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🔗 API доступно по адресу: http://localhost:${PORT}/api`);
-});
 
-// Обработка необработанных ошибок
-process.on('unhandledRejection', (error) => {
-    console.error('Unhandled Rejection:', error);
-});
-
-process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
+app.listen(PORT, () => {
+    console.log(`✅ Сервер успешно запущен на порту ${PORT}`);
 });
